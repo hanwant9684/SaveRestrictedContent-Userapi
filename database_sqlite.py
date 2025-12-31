@@ -605,7 +605,10 @@ class DatabaseManager:
         """Get user's API credentials (api_id, api_hash)"""
         user = self.get_user(user_id)
         if user and user.get('api_id') and user.get('api_hash'):
-            return (user['api_id'], user['api_hash'])
+            try:
+                return (int(user['api_id']), str(user['api_hash']))
+            except (ValueError, TypeError):
+                return None
         return None
 
     def get_stats(self) -> Dict:

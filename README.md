@@ -7,11 +7,13 @@ A Telegram bot for downloading and forwarding media from private/public channels
 - Download and forward media from Telegram channels
 - Support for multiple media types (photos, videos, documents)
 - Download concurrency management
-- Ad monetization system (URL shortener monetization has been retired)
+- Ad monetization system (RichAds integration)
 - SQLite database for user and session management (portable & lightweight)
 - Premium user system
 - Admin controls and broadcasting
 - Phone authentication for accessing restricted content
+- High-speed transfers using FastTelethon
+- Automated cloud backups (GitHub support)
 
 ## Setup Instructions
 

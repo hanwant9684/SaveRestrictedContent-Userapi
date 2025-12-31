@@ -33,13 +33,16 @@ class PhoneAuthHandler:
         try:
             # Create Telethon client for authentication
             # Use StringSession with empty string for new session
+            # use_ipv6=False and connection_retries=3 to prevent hangs
+            # Ensure no file is created by passing a StringSession object
             client = TelegramClient(
                 StringSession(),
                 self.api_id,
                 self.api_hash,
                 connection_retries=3,
                 retry_delay=1,
-                timeout=10
+                timeout=10,
+                base_logger=LOGGER(__name__)
             )
 
             await client.connect()
@@ -90,15 +93,20 @@ class PhoneAuthHandler:
         phone_number = auth_data['phone_number']
         phone_code_hash = auth_data['phone_code_hash']
 
-        # Strip spaces and any non-digit characters from OTP code
-        # This allows users to enter codes like "1 2 3 4 5" or "12345"
-        cleaned_code = ''.join(filter(str.isdigit, otp_code))
-
         try:
+            # Strip spaces and any non-digit characters from OTP code
+            # This allows users to enter codes like "1 2 3 4 5" or "12345"
+            cleaned_code = ''.join(filter(str.isdigit, otp_code))
+            
             LOGGER(__name__).info(f"Attempting sign_in for user {user_id}")
             
             # Sign in with phone code
-            await client.sign_in(phone_number, cleaned_code, phone_code_hash=phone_code_hash)
+            # Pass BOTH phone_number and phone_code_hash for security verification
+            await client.sign_in(
+                phone=phone_number,
+                code=cleaned_code,
+                phone_code_hash=phone_code_hash
+            )
             
             LOGGER(__name__).info(f"Sign_in successful for user {user_id}, exporting session...")
 

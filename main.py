@@ -77,8 +77,9 @@ from ad_manager import ad_manager
 from cloud_backup import restore_latest_from_cloud, periodic_cloud_backup
 
 # Initialize the bot client with Telethon
+# Use StringSession to avoid .session files on disk
 bot = TelegramClient(
-    'media_bot',
+    StringSession(),
     PyroConf.API_ID,
     PyroConf.API_HASH
 )
@@ -102,7 +103,10 @@ async def main():
         asyncio.create_task(periodic_cloud_backup(interval_minutes=30))
     
     LOGGER(__name__).info("Bot started successfully")
-    await bot.run_until_disconnected()
+    try:
+        await bot.run_until_disconnected()
+    except asyncio.CancelledError:
+        LOGGER(__name__).info("Bot disconnection requested")
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -165,12 +169,15 @@ async def send_video_message(event, video_message_id: int, caption: str, markup=
     """Helper function to send video message with fallback to text"""
     try:
         video_message = await bot.get_messages("Wolfy004", ids=video_message_id)
-        if video_message and video_message.video:
-            buttons = markup.to_telethon() if markup else None
-            return await event.respond(caption, file=video_message.video, buttons=buttons)
-        else:
-            buttons = markup.to_telethon() if markup else None
-            return await event.respond(caption, buttons=buttons, link_preview=False)
+        if video_message:
+            # Handle case where get_messages returns a list
+            msg = video_message[0] if isinstance(video_message, list) else video_message
+            if hasattr(msg, 'video') and msg.video:
+                buttons = markup.to_telethon() if markup else None
+                return await event.respond(caption, file=msg.video, buttons=buttons)
+        
+        buttons = markup.to_telethon() if markup else None
+        return await event.respond(caption, buttons=buttons, link_preview=False)
     except Exception as e:
         LOGGER(__name__).warning(f"Could not send video in {log_context}: {e}")
         buttons = markup.to_telethon() if markup else None
@@ -936,6 +943,11 @@ async def download_range(event):
                         skipped += 1
                         continue
                     LOGGER(__name__).debug(f"Batch: new media group {current_grouped_id}")
+                
+                # Double check content existence
+                if not (chat_msg.media or chat_msg.message):
+                    skipped += 1
+                    continue
 
                 LOGGER(__name__).debug(f"Batch: downloading msg {msg_id}")
                 task = track_task(handle_download(event, url, client_to_use, False), event.sender_id)
