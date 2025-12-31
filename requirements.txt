@@ -6,6 +6,3 @@ waitress
 orjson
 ffmpeg
 aiohttp
-flask
-gunicorn
-python-dotenv
