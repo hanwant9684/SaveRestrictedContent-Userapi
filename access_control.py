@@ -250,14 +250,20 @@ def force_subscribe(func):
                 # Get channel entity first
                 chat_entity = await client.get_entity(channel)
                 
-                # Try to get user as participant - this will raise UserNotParticipantError if not a member
-                participant = await client.get_participant(chat_entity, user_id)
-                if participant:
-                    # User is a member
-                    return await func(event)
-            except UserNotParticipantError:
-                # User is not in channel, fall through to show join message
-                pass
+                # Check if user is participant using the correct Telethon method
+                # Telethon's TelegramClient uses get_participants with a filter for single users
+                # or checks permissions directly.
+                from telethon.tl.functions.channels import GetParticipantRequest
+                from telethon.tl.types import ChannelParticipant
+                
+                try:
+                    participant_res = await client(GetParticipantRequest(chat_entity, user_id))
+                    if participant_res and hasattr(participant_res, 'participant'):
+                        # User is a member
+                        return await func(event)
+                except UserNotParticipantError:
+                    # User is not in channel, fall through to show join message
+                    pass
             except Exception as e:
                 # If get_participant fails for other reasons, try alternative method
                 LOGGER(__name__).debug(f"get_participant failed, trying get_permissions: {e}")

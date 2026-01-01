@@ -778,6 +778,7 @@ async def download_range(event):
         LOGGER(__name__).debug(f"Batch download: User {event.sender_id} has no running tasks - proceeding")
 
     # Register user in active downloads at the start of the batch
+    from queue_manager import download_manager
     download_manager.add_active_download(event.sender_id)
     
     try:
