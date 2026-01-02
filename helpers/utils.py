@@ -668,7 +668,7 @@ async def send_media(
         if fast_file:
             # FastTelethon upload: Use explicit filename to preserve extension
             # Use bot client to send to user, so it appears in bot chat, not Saved Messages
-            sent_message = await bot.send_file(
+            sent_message = await upload_client.send_file(
                 message.chat_id,
                 fast_file,
                 caption=caption or "",
@@ -676,7 +676,7 @@ async def send_media(
                 file_name=os.path.basename(media_path)
             )
         else:
-            sent_message = await bot.send_file(
+            sent_message = await upload_client.send_file(
                 message.chat_id,
                 media_path,
                 caption=caption or "",
@@ -723,7 +723,7 @@ async def send_media(
             
             if fast_file:
                 # Use bot client to send to user, so it appears in bot chat, not Saved Messages
-                sent_message = await bot.send_file(
+                sent_message = await upload_client.send_file(
                     message.chat_id,
                     fast_file,
                     caption=caption or "",
@@ -733,7 +733,7 @@ async def send_media(
                     file_name=os.path.basename(media_path)
                 )
             else:
-                sent_message = await bot.send_file(
+                sent_message = await upload_client.send_file(
                     message.chat_id,
                     media_path,
                     caption=caption or "",
@@ -784,7 +784,7 @@ async def send_media(
         if fast_file:
             # FastTelethon upload: Use explicit filename to preserve extension
             # Use bot client to send to user, so it appears in bot chat, not Saved Messages
-            sent_message = await bot.send_file(
+            sent_message = await upload_client.send_file(
                 message.chat_id,
                 fast_file,
                 caption=caption or "",
@@ -793,7 +793,7 @@ async def send_media(
                 file_name=os.path.basename(media_path)
             )
         else:
-            sent_message = await bot.send_file(
+            sent_message = await upload_client.send_file(
                 message.chat_id,
                 media_path,
                 caption=caption or "",
@@ -821,7 +821,7 @@ async def send_media(
         if fast_file:
             # FastTelethon upload: Use explicit filename to preserve extension
             # Use bot client to send to user, so it appears in bot chat, not Saved Messages
-            sent_message = await bot.send_file(
+            sent_message = await upload_client.send_file(
                 message.chat_id,
                 fast_file,
                 caption=caption or "",
@@ -829,7 +829,7 @@ async def send_media(
                 file_name=os.path.basename(media_path)
             )
         else:
-            sent_message = await bot.send_file(
+            sent_message = await upload_client.send_file(
                 message.chat_id,
                 media_path,
                 caption=caption or "",
