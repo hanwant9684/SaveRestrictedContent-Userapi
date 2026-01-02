@@ -354,7 +354,7 @@ async def help_command(event):
     
     await event.respond(help_text, buttons=markup.to_telethon(), link_preview=False)
 
-async def handle_download(event, post_url: str, user_client, increment_usage=True):
+async def handle_download(bot, event, post_url: str, user_client, increment_usage=True):
     """
     Handle downloading media from Telegram posts using USER API only
     
