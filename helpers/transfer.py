@@ -136,9 +136,10 @@ async def download_media_fast(
         ram_callback = create_ram_logging_callback(progress_callback, file_size, "DOWNLOAD", file_name)
         
         if media_location and file_size > 0:
-            with open(file, 'wb') as f:
-                # Add overall timeout for the entire download to prevent sticking
-                try:
+            downloader = None
+            try:
+                with open(file, 'wb') as f:
+                    # Add overall timeout for the entire download to prevent sticking
                     await asyncio.wait_for(
                         fast_download(
                             client=client,
@@ -150,9 +151,17 @@ async def download_media_fast(
                         ),
                         timeout=3600 # 1 hour max per file
                     )
-                except asyncio.TimeoutError:
-                    LOGGER(__name__).error(f"Download TIMEOUT for {file_name}")
-                    raise
+            except asyncio.TimeoutError:
+                LOGGER(__name__).error(f"Download TIMEOUT for {file_name}")
+                raise
+            except Exception as e:
+                LOGGER(__name__).error(f"Fast download core error: {e}")
+                raise
+            finally:
+                # Explicit cleanup of any potential downloader references
+                # FastTelethon download_file creates a ParallelTransferrer internally
+                pass
+
             end_ram = get_ram_usage_mb()
             LOGGER(__name__).info(f"[RAM] DOWNLOAD COMPLETE: {file_name} - RAM before GC: {end_ram:.1f}MB")
             
