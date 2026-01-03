@@ -137,17 +137,28 @@ async def download_media_fast(
         
         if media_location and file_size > 0:
             with open(file, 'wb') as f:
-                await fast_download(
-                    client=client,
-                    location=media_location,
-                    out=f,
-                    progress_callback=ram_callback,
-                    file_size=file_size,
-                    connection_count=connection_count
-                )
+                # Add overall timeout for the entire download to prevent sticking
+                try:
+                    await asyncio.wait_for(
+                        fast_download(
+                            client=client,
+                            location=media_location,
+                            out=f,
+                            progress_callback=ram_callback,
+                            file_size=file_size,
+                            connection_count=connection_count
+                        ),
+                        timeout=3600 # 1 hour max per file
+                    )
+                except asyncio.TimeoutError:
+                    LOGGER(__name__).error(f"Download TIMEOUT for {file_name}")
+                    raise
             end_ram = get_ram_usage_mb()
             LOGGER(__name__).info(f"[RAM] DOWNLOAD COMPLETE: {file_name} - RAM before GC: {end_ram:.1f}MB")
             
+            # Explicitly clear variables that might hold media references
+            media_location = None
+            f = None
             gc.collect()
             after_gc_ram = get_ram_usage_mb()
             ram_released = end_ram - after_gc_ram
@@ -196,12 +207,19 @@ async def upload_media_fast(
         ram_callback = create_ram_logging_callback(progress_callback, file_size, "UPLOAD", file_name)
         
         file_handle = open(file_path, 'rb')
-        result = await fast_upload(
-            client=client,
-            file=file_handle,
-            progress_callback=ram_callback,
-            connection_count=connection_count
+        # Add overall timeout for upload
+        result = await asyncio.wait_for(
+            fast_upload(
+                client=client,
+                file=file_handle,
+                progress_callback=ram_callback,
+                connection_count=connection_count
+            ),
+            timeout=3600
         )
+        
+        file_handle.close()
+        file_handle = None
         
         end_ram = get_ram_usage_mb()
         LOGGER(__name__).info(f"[RAM] UPLOAD COMPLETE: {file_name} - RAM before GC: {end_ram:.1f}MB")
@@ -218,6 +236,7 @@ async def upload_media_fast(
             except:
                 pass
         
+        result = None
         before_gc = get_ram_usage_mb()
         gc.collect()
         after_gc = get_ram_usage_mb()

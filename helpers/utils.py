@@ -211,6 +211,17 @@ async def generate_thumbnail(video_path, thumb_path=None, duration=None):
     
     strategies = []
     
+    # Prioritize first_frame for speed as a quick check
+    strategies.append({
+        "name": "first_frame_fast",
+        "cmd": [
+            "ffmpeg", "-y", "-analyzeduration", "10M", "-probesize", "10M",
+            "-i", video_path, "-ss", "0", "-vframes", "1",
+            "-vf", "scale=320:-1", "-q:v", "5", thumb_path
+        ],
+        "timeout": 5.0
+    })
+
     for pos_idx, seek_time in enumerate(seek_positions):
         for strategy_type in ["standard", "thumbnail_filter", "first_frame"]:
             if strategy_type == "standard":
@@ -617,18 +628,32 @@ async def forward_to_dump_channel(bot, sent_message, user_id, caption=None, sour
         if caption:
             custom_caption += f"\n\n📝 Original Caption:\n{caption[:3900]}"  # Reduced limit to fit URL
         
+        # Determine media to use (if sent_message is from user client, we use it directly)
+        media = sent_message.media if hasattr(sent_message, 'media') else None
+        
+        if not media:
+            LOGGER(__name__).warning("No media found in sent_message to forward")
+            return
+
         # Send media using the media from sent_message (no re-upload!)
         # Telethon reuses the file reference, so this is RAM-efficient
         await bot.send_file(
             channel_id,
-            sent_message.media,
+            media,
             caption=custom_caption
         )
         
         LOGGER(__name__).info(f"✅ Sent media to dump channel for user {user_id} (RAM-efficient, no re-upload, no 'Forwarded from' label)")
     except Exception as e:
         # Silently log errors - don't interrupt user's download
-        LOGGER(__name__).warning(f"Failed to send to dump channel: {e}")
+        error_str = str(e).lower()
+        if 'media_invalid' in error_str or 'media object is invalid' in error_str:
+            LOGGER(__name__).warning(f"Failed to send to dump channel: Media is invalid for bot (premium/protected content)")
+        else:
+            LOGGER(__name__).warning(f"Failed to send to dump channel: {e}")
+    finally:
+        # Clear reference
+        sent_message = None
 
 # Generate progress args for downloading/uploading (minimal tuple - low RAM)
 def progressArgs(action: str, progress_message, start_time):
@@ -686,6 +711,7 @@ async def send_media(
         
         # Forward to dump channel if configured (RAM-efficient, no re-upload)
         if user_id and sent_message:
+            # Use bot client to forward to dump channel (user client may not have access to dump channel)
             await forward_to_dump_channel(bot, sent_message, user_id, caption, source_url)
         
         memory_monitor.log_memory_snapshot("Upload Complete", f"User {user_id or 'unknown'}: {os.path.basename(media_path)} (photo)", silent=True)
@@ -804,6 +830,7 @@ async def send_media(
         
         # Forward to dump channel if configured (RAM-efficient, no re-upload)
         if user_id and sent_message:
+            # Use bot client to forward to dump channel (user client may not have access to dump channel)
             await forward_to_dump_channel(bot, sent_message, user_id, caption, source_url)
         
         memory_monitor.log_memory_snapshot("Upload Complete", f"User {user_id or 'unknown'}: {os.path.basename(media_path)} (audio)", silent=True)
@@ -839,6 +866,7 @@ async def send_media(
         
         # Forward to dump channel if configured (RAM-efficient, no re-upload)
         if user_id and sent_message:
+            # Use bot client to forward to dump channel (user client may not have access to dump channel)
             await forward_to_dump_channel(bot, sent_message, user_id, caption, source_url)
         
         memory_monitor.log_memory_snapshot("Upload Complete", f"User {user_id or 'unknown'}: {os.path.basename(media_path)} (document)", silent=True)
