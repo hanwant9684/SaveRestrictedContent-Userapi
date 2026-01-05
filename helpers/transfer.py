@@ -13,6 +13,7 @@ import os
 import asyncio
 import math
 import inspect
+import psutil
 import gc
 from typing import Optional, Callable, BinaryIO, Set, Dict
 from telethon import TelegramClient, utils
@@ -22,11 +23,39 @@ from FastTelethon import download_file as fast_download, upload_file as fast_upl
 
 CONNECTIONS_PER_TRANSFER = int(os.getenv("CONNECTIONS_PER_TRANSFER", "8"))
 
+def get_ram_usage_mb():
+    """Get current RAM usage in MB"""
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024
+
 def create_ram_logging_callback(original_callback: Optional[Callable], file_size: int, operation: str, file_name: str):
     """
-    Simplified progress callback wrapper.
+    Wrap progress callback to log RAM usage at 25%, 50%, 75% progress.
     """
+    logged_thresholds: Set[int] = set()
+    start_ram = get_ram_usage_mb()
+    LOGGER(__name__).info(f"[RAM] {operation} START: {file_name} - RAM: {start_ram:.1f}MB")
+    
     def ram_logging_wrapper(current: int, total: int):
+        nonlocal logged_thresholds
+        
+        if total <= 0:
+            if original_callback:
+                return original_callback(current, total)
+            return
+        
+        percent = (current / total) * 100
+        
+        for threshold in [25, 50, 75, 100]:
+            if percent >= threshold and threshold not in logged_thresholds:
+                logged_thresholds.add(threshold)
+                current_ram = get_ram_usage_mb()
+                ram_increase = current_ram - start_ram
+                LOGGER(__name__).info(
+                    f"[RAM] {operation} {threshold}%: {file_name} - "
+                    f"RAM: {current_ram:.1f}MB (+{ram_increase:.1f}MB from start)"
+                )
+        
         if original_callback:
             return original_callback(current, total)
     
@@ -105,9 +134,11 @@ async def download_media_fast(
         
         file_name = os.path.basename(file)
         ram_callback = create_ram_logging_callback(progress_callback, file_size, "DOWNLOAD", file_name)
-        if media_location:
-            try:
-                with open(file, "wb") as f:
+        
+        if media_location and file_size > 0:
+            with open(file, 'wb') as f:
+                # Add overall timeout for the entire download to prevent sticking
+                try:
                     await asyncio.wait_for(
                         fast_download(
                             client=client,
@@ -117,19 +148,21 @@ async def download_media_fast(
                             file_size=file_size,
                             connection_count=connection_count
                         ),
-                        timeout=3600
+                        timeout=3600 # 1 hour max per file
                     )
-            except asyncio.TimeoutError:
-                LOGGER(__name__).error(f"Download TIMEOUT for {file_name}")
-                raise
-            except Exception as e:
-                LOGGER(__name__).error(f"Fast download core error: {e}")
-                raise
-            finally:
-                pass
-
+                except asyncio.TimeoutError:
+                    LOGGER(__name__).error(f"Download TIMEOUT for {file_name}")
+                    raise
+            end_ram = get_ram_usage_mb()
+            LOGGER(__name__).info(f"[RAM] DOWNLOAD COMPLETE: {file_name} - RAM before GC: {end_ram:.1f}MB")
+            
+            # Explicitly clear variables that might hold media references
             media_location = None
             f = None
+            gc.collect()
+            after_gc_ram = get_ram_usage_mb()
+            ram_released = end_ram - after_gc_ram
+            LOGGER(__name__).info(f"[RAM] DOWNLOAD GC: {file_name} - RAM after GC: {after_gc_ram:.1f}MB (released: {ram_released:.1f}MB)")
             return file
         else:
             LOGGER(__name__).warning(
@@ -188,6 +221,8 @@ async def upload_media_fast(
         file_handle.close()
         file_handle = None
         
+        end_ram = get_ram_usage_mb()
+        LOGGER(__name__).info(f"[RAM] UPLOAD COMPLETE: {file_name} - RAM before GC: {end_ram:.1f}MB")
         return result
         
     except Exception as e:
@@ -202,6 +237,11 @@ async def upload_media_fast(
                 pass
         
         result = None
+        before_gc = get_ram_usage_mb()
+        gc.collect()
+        after_gc = get_ram_usage_mb()
+        ram_released = before_gc - after_gc
+        LOGGER(__name__).info(f"[RAM] UPLOAD GC: {os.path.basename(file_path)} - RAM after GC: {after_gc:.1f}MB (released: {ram_released:.1f}MB)")
 
 
 def get_connection_count_for_size(file_size: int, max_count: int = CONNECTIONS_PER_TRANSFER) -> int:
