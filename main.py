@@ -2,8 +2,8 @@
 # Channel: https://t.me/Wolfy004
 
 import os
-import psutil
 import asyncio
+import sys
 from time import time
 from attribution import verify_attribution, get_channel_link, get_creator_username
 
@@ -15,10 +15,10 @@ try:
 except ImportError:
     pass
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, functions, types
 from telethon.errors import PeerIdInvalidError, BadRequestError
 from telethon.sessions import StringSession
-from telethon_helpers import InlineKeyboardButton, InlineKeyboardMarkup, parse_command, get_command_args
+from telethon_helpers import InlineKeyboardButton, InlineKeyboardMarkup, parse_command, get_command_args, parse_message_link
 
 from helpers.utils import (
     processMediaGroup,
@@ -52,7 +52,6 @@ from database_sqlite import db
 from phone_auth import PhoneAuthHandler
 from ad_monetization import ad_monetization, PREMIUM_DOWNLOADS
 from access_control import admin_only, paid_or_admin_only, check_download_limit, register_user, check_user_session, get_user_client, force_subscribe
-from memory_monitor import memory_monitor
 from admin_commands import (
     add_admin_command,
     remove_admin_command,
@@ -77,42 +76,19 @@ from ad_manager import ad_manager
 from cloud_backup import restore_latest_from_cloud, periodic_cloud_backup
 
 # Initialize the bot client with Telethon
+# Telethon handles connection pooling and performance optimization automatically
 bot = TelegramClient(
     'media_bot',
     PyroConf.API_ID,
     PyroConf.API_HASH
 )
 
-async def main():
-    # Set bot start time for filtering old updates
-    bot.start_time = time()
-    
-    # Restore latest backup from GitHub on startup
-    if PyroConf.CLOUD_BACKUP_SERVICE == "github":
-        try:
-            await restore_latest_from_cloud()
-        except Exception as e:
-            LOGGER(__name__).error(f"Initial restore failed: {e}")
-    
-    # Start the bot
-    await bot.start(bot_token=PyroConf.BOT_TOKEN)
-    
-    # Start periodic backups in background
-    if PyroConf.CLOUD_BACKUP_SERVICE == "github":
-        asyncio.create_task(periodic_cloud_backup(interval_minutes=30))
-    
-    LOGGER(__name__).info("Bot started successfully")
-    await bot.run_until_disconnected()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
 # REMOVED: Global user client was bypassing SessionManager and wasting 30-100MB RAM
 # All users (including admins) must login with /login command to use SessionManager
 # This ensures proper memory limits (max 10 sessions on Render/Replit, ~5-10MB each due to StringSession)
 
 # Phone authentication handler
-phone_auth_handler = PhoneAuthHandler()
+phone_auth_handler = PhoneAuthHandler(PyroConf.API_ID, PyroConf.API_HASH)
 
 RUNNING_TASKS = set()
 USER_TASKS = {}
@@ -193,6 +169,8 @@ async def start(event):
     
     if not db.check_legal_acceptance(event.sender_id):
         LOGGER(__name__).info(f"User {event.sender_id} needs to accept legal terms")
+        
+        # Show legal terms first, which handles the ad display itself
         await show_legal_acceptance(event, bot)
         return
     
@@ -226,9 +204,9 @@ async def start(event):
     is_premium = user_type == 'paid'
     is_admin = db.is_admin(event.sender_id)
 
-    # Show ad for all users (New or Existing) on /start
-    # ad_manager.send_ad_with_fallback now handles "forced" logic
-    await ad_manager.send_ad_with_fallback(bot, event.sender_id, event.chat_id, lang_code, is_premium=is_premium, is_admin=is_admin, force=True)
+    # Show ad forcefully for ALL users on /start
+    # Note: If user hasn't accepted legal terms, this is handled in the if block above via show_legal_acceptance
+    await richads.send_ad_to_user(bot, event.sender_id, language_code=lang_code)
 
     welcome_text = (
         "🎉 **Welcome to Save Restricted Content Bot!**\n\n"
@@ -302,7 +280,7 @@ async def help_command(event):
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "ℹ️ **Other Commands:**\n\n"
             "   `/myinfo` - View account details\n"
-            "   `/stats` - Bot statistics\n\n"
+            "   `/logs` - View bot logs\n\n"
             "💡 **Your Benefits:**\n"
             "   ✅ Unlimited downloads\n"
             "   ✅ Priority access\n"
@@ -345,7 +323,7 @@ async def help_command(event):
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "ℹ️ **Other Commands:**\n\n"
             "   `/myinfo` - View account details\n"
-            "   `/stats` - Bot statistics"
+            "   `/logs` - View bot logs"
         )
 
     markup = InlineKeyboardMarkup(
@@ -366,18 +344,10 @@ async def handle_download(bot_client, event, post_url: str, user_client=None, in
     # Resolve URL and show ad first
     LOGGER(__name__).info(f"📥 LINK RECEIVED | User: {event.sender_id} | Link: {post_url}")
     
-    # Show ad immediately when user gives link
+    # Show ad forcefully on every download for all users
     sender = await event.get_sender()
     lang_code = getattr(sender, 'lang_code', 'en') or 'en'
-    user_type = db.get_user_type(event.sender_id)
-    is_premium = user_type == 'paid'
-    is_admin = db.is_admin(event.sender_id)
-    
-    await ad_manager.send_ad_with_fallback(bot_client, event.sender_id, event.chat_id, lang_code, is_premium=is_premium, is_admin=is_admin, force=True)
-
-    # Cut off URL at '?' if present
-    if "?" in post_url:
-        post_url = post_url.split("?", 1)[0]
+    await richads.send_ad_to_user(bot_client, event.sender_id, language_code=lang_code)
 
     try:
         LOGGER(__name__).debug(f"Attempting to parse URL: {post_url}")
@@ -458,9 +428,29 @@ async def handle_download(bot_client, event, post_url: str, user_client=None, in
 
         chat_message = await client_to_use.get_messages(chat_id, ids=message_id)
 
+        # Handle channel comments (linked chat)
+        if (not chat_message or not chat_message.media) and "?" in post_url and "comment=" in post_url:
+            try:
+                _, post_id, comment_id = parse_message_link(post_url)
+                # Use the post_id as the msg_id for GetDiscussionMessageRequest
+                msg_id_for_disc = post_id or message_id
+                result = await client_to_use(functions.messages.GetDiscussionMessageRequest(peer=chat_id, msg_id=msg_id_for_disc))
+                if result and result.messages:
+                    disc_peer = result.messages[0].peer_id
+                    chat_message = await client_to_use.get_messages(disc_peer, ids=comment_id)
+                    if chat_message:
+                        chat_id, message_id = disc_peer, comment_id
+                        LOGGER(__name__).info(f"Retrieved comment from discussion group {chat_id}")
+            except Exception as e:
+                LOGGER(__name__).error(f"Error resolving comment: {e}")
+
+        if not chat_message:
+            await event.respond(f"❌ **Message not found.**\n\nMessage ID `{message_id}` could not be retrieved from chat `{chat_id}`. Make sure the message still exists and you have access to it.")
+            return
+
         LOGGER(__name__).debug(f"Downloading media from URL: {post_url}")
 
-        if chat_message.document or chat_message.video or chat_message.audio:
+        if chat_message.document or chat_message.video or chat_message.audio or chat_message.photo:
             # Telethon uses .size instead of .file_size (Pyrogram compatibility)
             # Use message.file.size as universal way to get file size in Telethon
             file_size = chat_message.file.size if chat_message.file else 0
@@ -544,21 +534,9 @@ async def handle_download(bot_client, event, post_url: str, user_client=None, in
                         f"✅ **Download complete**{remaining_msg}",
                         buttons=upgrade_keyboard.to_telethon()
                     )
-                    
-                    # Show RichAds after download completes for free users
-                    await ad_manager.send_ad_with_fallback(bot_client, event.sender_id, event.chat_id, is_premium=False, is_admin=False)
                 else:
                     # Premium/Admin users: simple completion message without buttons
                     await event.respond("✅ **Download complete**")
-                    
-                    # Show RichAds after download completes for premium users too
-                    if richads.is_enabled():
-                        try:
-                            sender = await event.get_sender()
-                            lang_code = getattr(sender, 'lang_code', 'en') or 'en'
-                            await richads.send_ad_to_user(bot, event.chat_id, lang_code)
-                        except Exception as ad_error:
-                            LOGGER(__name__).warning(f"Failed to send RichAd after download: {ad_error}")
             
             return
 
@@ -571,7 +549,6 @@ async def handle_download(bot_client, event, post_url: str, user_client=None, in
             # Set expected path BEFORE download - ensures cleanup works even if timeout during download
             media_path = download_path
 
-            memory_monitor.log_memory_snapshot("Download Start", f"User {event.sender_id}: {filename}", silent=True)
             
             async def process_single_file():
                 nonlocal media_path
@@ -584,7 +561,6 @@ async def handle_download(bot_client, event, post_url: str, user_client=None, in
                 )
                 media_path = result_path  # Update with actual result
 
-                memory_monitor.log_memory_snapshot("Download Complete", f"User {event.sender_id}: {filename}", silent=True)
                 LOGGER(__name__).debug(f"Downloaded media: {media_path}")
                 
                 # RAM OPTIMIZATION: Release download buffers before upload starts
@@ -612,7 +588,6 @@ async def handle_download(bot_client, event, post_url: str, user_client=None, in
                     start_time,
                     event.sender_id,
                     source_url=post_url,
-                    user_client=client_to_use,
                 )
                 return True
 
@@ -645,26 +620,8 @@ async def handle_download(bot_client, event, post_url: str, user_client=None, in
                             f"✅ **Download complete**{remaining_msg}",
                             buttons=upgrade_markup.to_telethon()
                         )
-                        
-                        # Show RichAds after download completes for free users
-                        if richads.is_enabled():
-                            try:
-                                sender = await event.get_sender()
-                                lang_code = getattr(sender, 'lang_code', 'en') or 'en'
-                                await richads.send_ad_to_user(bot, event.chat_id, lang_code)
-                            except Exception as ad_error:
-                                LOGGER(__name__).warning(f"Failed to send RichAd after download: {ad_error}")
                     else:
                         await event.respond("✅ **Download complete**")
-                        
-                        # Show RichAds after download completes for premium users
-                        if richads.is_enabled():
-                            try:
-                                sender = await event.get_sender()
-                                lang_code = getattr(sender, 'lang_code', 'en') or 'en'
-                                await richads.send_ad_to_user(bot, event.chat_id, lang_code)
-                            except Exception as ad_error:
-                                LOGGER(__name__).warning(f"Failed to send RichAd after download: {ad_error}")
             except asyncio.TimeoutError:
                 LOGGER(__name__).error(f"Single file download timeout for user {event.sender_id} after 45 minutes: {filename}")
                 try:
@@ -709,14 +666,6 @@ async def download_media(event):
             "❌ **No active session found.**\n\n"
             "Please login with your phone number:\n"
             "`/login +(91)9012345678` OR `/login +919012345678`"
-        )
-        return
-    elif error_code == 'no_api':
-        await event.respond(
-            "❌ **API credentials not set!**\n\n"
-            "Please set your API credentials first:\n"
-            "`/setapi <API_ID> <API_HASH>`\n\n"
-            "Get them from: @Api_id_api_hash_wolfy004_bot"
         )
         return
     elif error_code == 'slots_full':
@@ -824,14 +773,6 @@ async def download_range(event):
             "`/login +(91)9012345678` OR `/login +919012345678`"
         )
         return
-    elif error_code == 'no_api':
-        await event.respond(
-            "❌ **API credentials not set!**\n\n"
-            "Please set your API credentials first:\n"
-            "`/setapi <API_ID> <API_HASH>`\n\n"
-            "Get them from: @Api_id_api_hash_wolfy004_bot"
-        )
-        return
     elif error_code == 'slots_full':
         from queue_manager import download_manager
         active_count = len(download_manager.active_downloads)
@@ -931,6 +872,11 @@ async def download_range(event):
             
             try:
                 chat_msg = await client_to_use.get_messages(start_chat, ids=msg_id)
+                
+                # PERMANENT FLOODWAIT FIX: Add delay between each message fetch in batch
+                # Free users: 1.5s, Premium: 0.8s (Safe levels for Telegram)
+                await asyncio.sleep(0.8 if is_premium else 1.5)
+                
                 if not chat_msg:
                     LOGGER(__name__).debug(f"Batch: msg {msg_id} not found")
                     skipped += 1
@@ -953,7 +899,6 @@ async def download_range(event):
                     LOGGER(__name__).debug(f"Batch: new media group {current_grouped_id}")
 
                 LOGGER(__name__).debug(f"Batch: downloading msg {msg_id}")
-                # Ensure we pass client_to_use (user client)
                 task = track_task(handle_download(bot, event, url, client_to_use, False), event.sender_id)
                 try:
                     await task
@@ -1014,97 +959,6 @@ async def download_range(event):
         LOGGER(__name__).debug(f"Batch: removed user {event.sender_id} from active_downloads")
 
 # Phone authentication commands
-@bot.on(events.NewMessage(pattern='/setapi', incoming=True, func=lambda e: e.is_private))
-@register_user
-async def setapi_command(event):
-    """Set user's personal API credentials"""
-    args = get_command_args(event.text)
-    
-    if len(args) < 2:
-        await event.respond(
-            "🔑 **Set Your Personal API Credentials**\n\n"
-            "**Usage:** `/setapi <API_ID> <API_HASH>`\n\n"
-            "**How to get your API credentials:**\n"
-            "1️⃣ Go to @Api_id_api_hash_wolfy004_bot\n"
-            "2️⃣ Login with your phone number\n"
-            "3️⃣ Give bot you otp code'\n"
-            "4️⃣ Bot will give you api id & hash\n"
-            "5️⃣ Copy your `api_id` and `api_hash`\n\n"
-            "**Example:**\n"
-            "`/setapi 12345678 abcdef1234567890abcdef1234567890`\n\n"
-            "⚠️ **Keep your API credentials safe!** They give full access to your Telegram account."
-        )
-        return
-    
-    try:
-        api_id = int(args[0])
-        api_hash = args[1].strip()
-        
-        # Validate API hash format (should be 32 hex characters)
-        if len(api_hash) != 32:
-            await event.respond("❌ **Invalid API_HASH format.** It should be 32 characters long.")
-            return
-        
-        # Save to database
-        if db.set_user_api(event.sender_id, api_id, api_hash):
-            await event.respond(
-                "✅ **API credentials saved!**\n\n"
-                "Now login with your phone number:\n"
-                "`/login +919012345678`"
-            )
-            LOGGER(__name__).info(f"User {event.sender_id} set their API credentials")
-        else:
-            await event.respond("❌ **Failed to save API credentials.** Please try again.")
-            
-    except ValueError:
-        await event.respond("❌ **Invalid API_ID.** It should be a number.")
-
-
-@bot.on(events.NewMessage(pattern='/myapi', incoming=True, func=lambda e: e.is_private))
-@register_user
-async def myapi_command(event):
-    """Show user's API status"""
-    api_id, api_hash = db.get_user_api(event.sender_id)
-    session = db.get_user_session(event.sender_id)
-    
-    if api_id and api_hash:
-        status = "✅ API credentials set"
-        api_info = f"**API ID:** `{api_id}`\n**API Hash:** `{api_hash[:8]}...{api_hash[-4:]}`"
-    else:
-        status = "❌ No API credentials"
-        api_info = "Use `/setapi` to set your credentials"
-    
-    session_status = "✅ Logged in" if session else "❌ Not logged in"
-    
-    await event.respond(
-        f"🔑 **Your API Status**\n\n"
-        f"**API:** {status}\n"
-        f"{api_info}\n\n"
-        f"**Session:** {session_status}\n\n"
-        f"Use `/clearapi` to remove your credentials"
-    )
-
-
-@bot.on(events.NewMessage(pattern='/clearapi', incoming=True, func=lambda e: e.is_private))
-@register_user  
-async def clearapi_command(event):
-    """Clear user's API credentials and session"""
-    from helpers.session_manager import session_manager
-    
-    # Remove from session manager
-    await session_manager.remove_session(event.sender_id)
-    
-    # Clear from database
-    if db.clear_user_api(event.sender_id):
-        await event.respond(
-            "✅ **API credentials and session cleared!**\n\n"
-            "To use the bot again:\n"
-            "1️⃣ `/setapi <API_ID> <API_HASH>`\n"
-            "2️⃣ `/login <phone_number>`"
-        )
-    else:
-        await event.respond("❌ **Failed to clear credentials.** Please try again.")
-
 @bot.on(events.NewMessage(pattern='/login', incoming=True, func=lambda e: e.is_private))
 @register_user
 async def login_command(event):
@@ -1327,31 +1181,6 @@ async def handle_any_message(event):
         if msg:  # Only reply if there's a message to send
             await event.respond(msg)
 
-@bot.on(events.NewMessage(pattern='/stats', incoming=True, func=lambda e: e.is_private))
-@register_user
-async def stats(event):
-    currentTime = get_readable_time(int(time() - PyroConf.BOT_START_TIME))
-    process = psutil.Process(os.getpid())
-    
-    bot_memory_mb = round(process.memory_info()[0] / 1024**2)
-    cpu_percent = process.cpu_percent(interval=0.1)
-
-    stats_text = (
-        "🤖 **BOT STATUS**\n"
-        "—————————————————————\n\n"
-        "✨ **Status:** Online & Running\n\n"
-        "📊 **System Metrics:**\n"
-        f"⏱️ Uptime: `{currentTime}`\n"
-        f"💾 Memory: `{bot_memory_mb} MiB`\n"
-        f"⚡ CPU: `{cpu_percent}%`\n\n"
-        "—————————————————————\n\n"
-        "💡 **Quick Access:**\n"
-        "• `/status` - Check downloads\n"
-        "• `/myinfo` - Your account\n"
-        "• `/help` - All commands"
-    )
-    await event.respond(stats_text)
-
 @bot.on(events.NewMessage(pattern='/logs', incoming=True, func=lambda e: e.is_private))
 @admin_only
 async def logs(event):
@@ -1451,6 +1280,42 @@ async def test_dump_channel(event):
 @bot.on(events.NewMessage(pattern='/adminstats', incoming=True, func=lambda e: e.is_private))
 async def admin_stats_handler(event):
     await admin_stats_command(event, download_mgr=download_manager)
+
+@bot.on(events.NewMessage(pattern='/createpromo', incoming=True, func=lambda e: e.is_private))
+async def create_promo_handler(event):
+    await create_promo_command(event)
+
+@bot.on(events.NewMessage(pattern='/listpromos', incoming=True, func=lambda e: e.is_private))
+async def list_promos_handler(event):
+    await list_promos_command(event)
+
+@bot.on(events.NewMessage(pattern='/deletepromo', incoming=True, func=lambda e: e.is_private))
+async def delete_promo_handler(event):
+    await delete_promo_command(event)
+
+@bot.on(events.NewMessage(pattern='/applypromo', incoming=True, func=lambda e: e.is_private))
+@register_user
+async def apply_promo_handler(event):
+    """Apply a promo code to get premium access"""
+    try:
+        command = parse_command(event.text)
+        if len(command) < 2:
+            await event.respond(
+                "**Usage:** `/applypromo <code>`\n\n"
+                "**Example:** `/applypromo PROMO123`"
+            )
+            return
+
+        code = command[1].strip().upper()
+        success, msg = promo_manager.validate_and_apply(code, event.sender_id)
+        await event.respond(msg)
+        
+        if success:
+            LOGGER(__name__).info(f"User {event.sender_id} applied promo code {code}")
+            
+    except Exception as e:
+        await event.respond(f"❌ **Error applying promo code:** {str(e)}")
+        LOGGER(__name__).error(f"Error in apply_promo_handler: {e}")
 
 @bot.on(events.NewMessage(pattern='/getpremium', incoming=True, func=lambda e: e.is_private))
 @register_user
@@ -1649,40 +1514,6 @@ async def myinfo_handler(event):
     await user_info_command(event)
 
 # Callback query handler
-@bot.on(events.NewMessage(pattern='/createpromo', incoming=True, func=lambda e: e.is_private))
-async def handle_create_promo(event):
-    await create_promo_command(event)
-
-@bot.on(events.NewMessage(pattern='/listpromos', incoming=True, func=lambda e: e.is_private))
-async def handle_list_promos(event):
-    await list_promos_command(event)
-
-@bot.on(events.NewMessage(pattern='/deletepromo', incoming=True, func=lambda e: e.is_private))
-async def handle_delete_promo(event):
-    await delete_promo_command(event)
-
-@bot.on(events.NewMessage(pattern='/applypromo', incoming=True, func=lambda e: e.is_private))
-@register_user
-async def apply_promo_command(event):
-    """Apply a promo code to get premium access"""
-    try:
-        args = get_command_args(event.text)
-        if len(args) < 1:
-            await event.respond("**Usage:** `/applypromo <code>`\n\nExample: `/applypromo ABC12345`")
-            return
-        
-        code = args[0].upper()
-        is_valid, message = promo_manager.validate_and_apply(code, event.sender_id)
-        
-        if is_valid:
-            await event.respond(message)
-            LOGGER(__name__).info(f"User {event.sender_id} applied promo code {code}")
-        else:
-            await event.respond(message)
-    except Exception as e:
-        await event.respond(f"❌ **Error: {str(e)}**")
-        LOGGER(__name__).error(f"Error in apply_promo_command: {e}")
-
 @bot.on(events.CallbackQuery())
 async def callback_handler(event):
     data = event.data
@@ -1946,15 +1777,72 @@ async def verify_dump_channel():
 # This ensures downloaded files are cleaned up every 30 minutes to prevent memory/disk leaks
 
 if __name__ == "__main__":
+    @bot.on(events.CallbackQuery(data=b"watch_ad_now"))
+    async def watch_ad_callback(event):
+        """Handle the 'Watch Ad & Get Downloads' button callback"""
+        user_id = event.sender_id
+        sender = await event.get_sender()
+        lang_code = getattr(sender, 'lang_code', 'en') or 'en'
+        
+        # Show the ad
+        success = await richads.send_ad_to_user(bot, event.chat_id, lang_code)
+        
+        if success:
+            # Increment ad downloads quota in DB
+            db.add_ad_downloads(user_id, PREMIUM_DOWNLOADS)
+            await event.respond(f"✅ **Ad watched!**\n\n🎁 You've received **{PREMIUM_DOWNLOADS}** extra downloads for this session!")
+            LOGGER(__name__).info(f"User {user_id} watched ad via button and got {PREMIUM_DOWNLOADS} downloads")
+        else:
+            # Fallback to original watch ad (blog link) if RichAds has no ads
+            from ad_monetization import ad_monetization
+            from config import PyroConf
+            
+            bot_domain = PyroConf.get_app_url()
+            session_id, ad_url = ad_monetization.generate_ad_link(user_id, bot_domain)
+            
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton.url("🔗 Watch Ad Now", ad_url)],
+                [InlineKeyboardButton.callback("✅ Verify Completion", f"verify_ad_{session_id}")]
+            ])
+            
+            await event.respond(
+                "📺 **No direct ads available right now.**\n\n"
+                "Don't worry! You can still get your **5 free downloads** by watching an ad on our website.\n\n"
+                "1. Click the button below\n"
+                "2. Complete the ad on the page\n"
+                "3. Come back and click 'Verify Completion'",
+                buttons=markup.to_telethon()
+            )
+            LOGGER(__name__).info(f"User {user_id} failed to get RichAd, falling back to blog ad link")
+
+    @bot.on(events.CallbackQuery(data=b"upgrade_premium"))
+    async def upgrade_premium_callback(event):
+        """Handle 'Upgrade to Premium' button callback"""
+        # Redirect to upgrade command logic
+        from admin_commands import user_info_command
+        await event.respond("💎 **Premium Access**\n\nUpgrade for unlimited downloads and priority access.\nUse `/upgrade` to see payment options.")
+        await event.answer()
+
     async def main():
         from queue_manager import download_manager
         from helpers.session_manager import session_manager
         from helpers.cleanup import start_periodic_cleanup
         
         try:
+            # Restore latest backup from GitHub on startup
+            if PyroConf.CLOUD_BACKUP_SERVICE == "github":
+                try:
+                    await restore_latest_from_cloud()
+                except Exception as e:
+                    LOGGER(__name__).error(f"Initial restore failed: {e}")
+
             await bot.start(bot_token=PyroConf.BOT_TOKEN)
             await download_manager.start_processor()
             LOGGER(__name__).info("Download queue processor initialized")
+            
+            # Start periodic backups in background
+            if PyroConf.CLOUD_BACKUP_SERVICE == "github":
+                asyncio.create_task(periodic_cloud_backup(interval_minutes=30))
             
             # Start cleanup tasks to prevent memory and disk leaks
             phone_auth_handler.start_cleanup_task()
@@ -1983,6 +1871,24 @@ if __name__ == "__main__":
             LOGGER(__name__).info("Download manager sweep task started")
             
             LOGGER(__name__).info("Bot Started!")
+
+            @bot.on(events.NewMessage(pattern='/applypromo', incoming=True, func=lambda e: e.is_private))
+            @bot.on(events.NewMessage(pattern='/promo', incoming=True, func=lambda e: e.is_private))
+            @register_user
+            async def promo_handler(event):
+                """Handle /promo <code> or /applypromo <code> command"""
+                try:
+                    args = get_command_args(event.text)
+                    if len(args) < 1:
+                        await event.respond("**Usage:** `/promo <code>` or `/applypromo <code>`")
+                        return
+                    
+                    code = args[0].upper()
+                    success, message = promo_manager.validate_and_apply(code, event.sender_id)
+                    await event.respond(message)
+                except Exception as e:
+                    await event.respond(f"❌ **Error:** {str(e)}")
+
             await bot.run_until_disconnected()
         except KeyboardInterrupt:
             pass

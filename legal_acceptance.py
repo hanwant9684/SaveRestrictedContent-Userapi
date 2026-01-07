@@ -3,6 +3,7 @@
 # Legal acceptance handler for Terms & Conditions and Privacy Policy
 
 import os
+import asyncio
 from functools import wraps
 from telethon_helpers import InlineKeyboardButton, InlineKeyboardMarkup
 from logger import LOGGER
@@ -122,12 +123,16 @@ async def show_legal_acceptance(event, bot=None):
         await event.respond(summary, buttons=markup.to_telethon(), link_preview=False)
         LOGGER(__name__).info(f"Shown legal acceptance screen to user {event.sender_id}")
         
-        # Show ad below legal acceptance if bot client is provided
-        if bot and ad_manager.is_any_enabled():
+        # Wait a moment to prevent conflicts with buttons and ensure they are visible
+        await asyncio.sleep(1.5)
+        
+        # Show ad below legal acceptance for all users as a separate message
+        if bot:
             try:
+                from richads import richads
                 sender = await event.get_sender()
                 lang_code = getattr(sender, 'lang_code', 'en') or 'en'
-                await ad_manager.send_ad_with_fallback(bot, event.sender_id, event.chat_id, lang_code)
+                await richads.send_ad_to_user(bot, event.sender_id, language_code=lang_code)
             except Exception as ad_error:
                 LOGGER(__name__).warning(f"Failed to send ad after legal acceptance: {ad_error}")
         
